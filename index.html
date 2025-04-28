@@ -1,0 +1,494 @@
+<!-- TODO: Revamp whole code as inefficent and poorly implemented/understoof features -->
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Moved from seperate CSS to here; <link rel="stylesheet" href="chip8.css"> -->
+    <title>CHIP-8 Emulator</title>
+    <style>
+        .content {
+            width: 1000px;
+            margin: auto;
+        }
+
+        canvas {
+            border: 1px solid black;
+        }
+
+        #controls {
+            margin: 10px 0;
+            margin-left: 20px;
+        }
+
+        #opcodeFeed {
+            width: 300px;
+            height: 200px;
+            border: 1px solid black;
+            overflow-y: scroll;
+            font-family: monospace;
+            padding: 5px;
+            background-color: #f0f0f0;
+        }
+
+        #registersDisplay {
+            width: 300px;
+            height: 120px;
+            /* Half of canvas height (320px / 2) */
+            border: 1px solid black;
+            font-family: monospace;
+            padding: 5px;
+            background-color: #f0f0f0;
+            margin-top: 10px;
+        }
+
+        #emulatorContainer {
+            display: flex;
+            gap: 20px;
+        }
+
+        #refreshRateInput:disabled {
+            background-color: #f0f0f0;
+            color: #888;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="content">
+        <div id="controls">
+            <!-- Only supports uploading supported files; TODO: Research found this would be security concern if done automatically and solutions arent simple without learning unfamilar APIS, therefore Must mannually navigate to directory -->
+            <input type="file" id="uploadROM" accept=".ch8" />
+            <button id="startStopBtn" onclick="toggleStartStop()" disabled>Start</button>
+            <!-- Comment out to remove Clear button -->
+            <button id="clearBtn" onclick="clearEmulator()" disabled>Clear</button>
+            <label for="refreshRateInput">DisplayRate (0-60): </label>
+            <input type="number" id="refreshRateInput" min="0" max="60" value="30" disabled />
+        </div>
+        <div id="emulatorContainer">
+            <!-- Default Chip-8 Size: TODO: add support for different screen sizes -->
+            <canvas id="chip8Canvas" width="640" height="320"></canvas>
+            <div>
+                <div id="opcodeFeed"></div>
+                <div id="registersDisplay"></div>
+            </div>
+        </div>
+    </div>
+    <!-- End of Body elements -->
+
+
+
+    <!-- Scripts after elements been loaded, hence below tags Moved from seperate Javascript file to here;
+    <script src="chip.js"></script> -->
+    <script>
+        // Variables
+        const WIDTH = 64;   //128 for sChip
+        const HEIGHT = 32;  //64 for sChip
+        const SCALE = 10;   //Screen Scale for different devices as per tutorial TODO: Add More Device scale and Support
+        //const mempry_SIZE = 4096;
+        const PROGRAM_START = 0x200;
+        const FPS = 60;
+        const CYCLES_PER_SECOND = 700;
+
+        // Canvas display
+        const canvas = document.getElementById("chip8Canvas");
+        const canvasLogic = canvas.getContext("2d");
+        canvasLogic.imageSmoothingEnabled = false;
+
+        //Monochrome Display Buffer
+        let display = new Uint8Array(WIDTH * HEIGHT);
+        let displayDirty = false;
+
+        // Mempoy and registers
+        let mempry = new Uint8Array(4096); //4kb RAM in bytes as Unsigned ArrayBuffer
+        let V = new Uint8Array(16);  //V0-VF, 16 1byte (8 bits) general purpose Registers 0(V0) through to 15(VF)
+        let I = 0; //Index Register
+        let PC = PROGRAM_START; //Program counter starts at memory location '512 (0x200)'. 
+        let stack = new Uint16Array(16); //Empty stack
+        let SP = 0; //Stack pointer
+
+        // Timers
+        let delay_timer = 0;
+
+
+        // Emulator state
+        let isRunning = false;
+        let cyclesPerFrame = 10;
+        let emulatorStarted = false;
+
+        // Get UI elements
+        const opcodeFeed = document.getElementById("opcodeFeed");
+        const registersDisplay = document.getElementById("registersDisplay");
+        const startStopBtn = document.getElementById("startStopBtn");
+        const clearBtn = document.getElementById("clearBtn");
+        const refreshRateInput = document.getElementById("refreshRateInput");
+        const romFileInput = document.getElementById("uploadROM");
+        let opcodeBuffer = [];
+
+        //TODO: Audio Timer and Setup
+
+        //Default Fonts set(0-F)- '0to512 memory locations using Hexadecimal prefixed with "0x..."'
+        //TODO: Allow to be customizable in settings?
+        const fontset = [
+            0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+            0x20, 0x60, 0x20, 0x20, 0x70, // 1
+            0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+            0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+            0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+            0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+            0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+            0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+            0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+            0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+            0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+            0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+            0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+            0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+            0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+            0xF0, 0x80, 0xF0, 0x80, 0x80  // F
+        ];
+        mempry.set(fontset, 0x50);
+
+        //Keyboard - Original Chip8: [0-9, A-F {16keys}] to Traditional QWERTY [1-4, QWER, ASDF, ZXCV {16 keys}]
+        //TODO: Allow to be customizable and onscreen highlighting?
+        //Also rewrite as testing found some keys not working and overall slow to recognize
+        const keyMap = {
+            "1": 0x1, "2": 0x2, "3": 0x3, "4": 0xC,
+            "q": 0x4, "w": 0x5, "e": 0x6, "r": 0xD,
+            "a": 0x7, "s": 0x8, "d": 0x9, "f": 0xE,
+            "z": 0xA, "x": 0x0, "c": 0xB, "v": 0xF
+        };
+        let keys = new Uint8Array(16);
+
+
+        //Load files; Taken from stackoverflow tutorial and adjusted
+        function load_rom(file) {
+            // Clear and reset
+            display.fill(0);
+            displayDirty = true;
+            updateDisplay();
+
+            //Displays file explorer GUI
+            const reader = new FileReader();
+            reader.onload = function (event) {
+                mempry.set(new Uint8Array(event.target.result), PROGRAM_START);
+                // Reset state
+                PC = PROGRAM_START;
+                I = 0;
+                SP = 0;
+                V.fill(0);
+                delay_timer = 0;
+                sound_timer = 0;
+                opcodeBuffer = [];
+                opcodeFeed.innerHTML = '';
+                updateRegistersDisplay();
+
+                if (!emulatorStarted) {
+                    startEmulator();
+                    emulatorStarted = true;
+                }
+
+                startStopBtn.disabled = false;
+                clearBtn.disabled = false;
+                refreshRateInput.disabled = !isRunning;
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        // Clear values to default
+        function clearEmulator() {
+            display.fill(0);
+            displayDirty = true;
+            updateDisplay();
+            mempry.fill(0, PROGRAM_START);
+            mempry.set(fontset, 0x50);
+            V.fill(0);
+            I = 0;
+            PC = PROGRAM_START;
+            SP = 0;
+            delay_timer = 0;
+            sound_timer = 0;
+            keys.fill(0);
+            opcodeBuffer = [];
+            opcodeFeed.innerHTML = '';
+            updateRegistersDisplay();
+            isRunning = false;
+            startStopBtn.textContent = "Start";
+            refreshRateInput.disabled = true;
+            startStopBtn.disabled = true;
+            clearBtn.disabled = true;
+            romFileInput.value = ''; // Clear file input
+        }
+
+        // Fetch OPCodes
+        function fetchOpCOdes() {
+            //Get value at memory position 'PC' as Bitwise value from let to right & 
+            //Combining 2 consecutive high shifted bytes values into 4digit big endian hex opcode.
+            return (mempry[PC] << 8) | mempry[PC + 1];
+        }
+
+        // Optimized draw display
+        function updateDisplay() {
+            if (!displayDirty) return;
+
+            const imageData = canvasLogic.createImageData(WIDTH * SCALE, HEIGHT * SCALE);
+            const data = imageData.data;
+
+            //2D Array Loop to update display 
+            for (let y = 0; y < HEIGHT; y++) {
+                for (let x = 0; x < WIDTH; x++) {
+                    const pixel = display[y * WIDTH + x];
+                    const scaledX = x * SCALE;
+                    const scaledY = y * SCALE;
+
+                    for (let sy = 0; sy < SCALE; sy++) {
+                        for (let sx = 0; sx < SCALE; sx++) {
+                            const idx = ((scaledY + sy) * WIDTH * SCALE + (scaledX + sx)) * 4;
+                            data[idx] = pixel * 255;
+                            data[idx + 1] = pixel * 255;
+                            data[idx + 2] = pixel * 255;
+                            data[idx + 3] = 255;
+                        }
+                    }
+                }
+            }
+            canvasLogic.putImageData(imageData, 0, 0);
+            displayDirty = false;
+        }
+
+        // Update timer(s)
+        function updateTimer() {
+            if (delay_timer > 0) delay_timer--;
+        }
+
+        // Update opcode feed
+        function updateOpcodeFeed(opcode) {
+            opcodeBuffer.push(`PC: 0x${PC.toString(16).padStart(4, '0')} - Opcode: 0x${opcode.toString(16).padStart(4, '0')}`);
+            if (opcodeBuffer.length > 100) opcodeBuffer.shift();
+        }
+
+        // Flush opcode buffer
+        function OpcodeBuffer() {
+            if (opcodeBuffer.length > 0) {
+                opcodeFeed.innerHTML = opcodeBuffer.join('<br>');
+                opcodeFeed.scrollTop = opcodeFeed.scrollHeight;
+                opcodeBuffer = [];
+            }
+        }
+
+        // Update registers display
+        function updateRegistersDisplay() {
+            const vRegisters = Array.from(V).map((val, i) =>
+                `V${i.toString(16).toUpperCase()}: 0x${val.toString(16).padStart(2, '0')}`
+            ); const formattedV = vRegisters.join(' ');
+            registersDisplay.innerHTML = `
+                ${formattedV}<br>
+                I: 0x${I.toString(16).padStart(4, '0')}<br>
+                PC: 0x${PC.toString(16).padStart(4, '0')}<br>
+                SP: 0x${SP.toString(16).padStart(2, '0')}<br>
+            `;
+            //Add Timers and other details
+            //TODO: Include Step-in/out functionality
+        }
+
+        // Emulate/Mimic CPU (One Cycle)/ Disassembler
+        function emulateCycle() {
+            const opcode = fetchOpCOdes();
+            updateOpcodeFeed(opcode);
+            PC += 2;
+
+
+            const x = (opcode & 0x0F00) >> 8;   //Reg x
+            const y = (opcode & 0x00F0) >> 4;   //Reg y
+
+            const nnn = opcode & 0x0FFF;    //12-bit address
+            const nn = opcode & 0x00FF;     //8-bit
+            const n = opcode & 0x000F;      //4-bit
+
+            //Logic not exactly understood hence taken from past examples/manuals/documentation and adapted to JS
+            //TODO: Revamp logic & Convert to Map for Better understanding and easier changes.
+            if (opcode === 0x00E0) {
+                display.fill(0);    //Clear
+                displayDirty = true;
+            } else if (opcode === 0x00EE) {
+                PC = stack[--SP];
+            } else if ((opcode & 0xF000) === 0x1000) {
+                PC = nnn;
+            } else if ((opcode & 0xF000) === 0x2000) {
+                stack[SP++] = PC;
+                PC = nnn;
+            } else if ((opcode & 0xF000) === 0x3000) {
+                if (V[x] === nn) PC += 2;
+            } else if ((opcode & 0xF000) === 0x4000) {
+                if (V[x] !== nn) PC += 2;
+            } else if ((opcode & 0xF00F) === 0x5000) {
+                if (V[x] === V[y]) PC += 2;
+            } else if ((opcode & 0xF000) === 0x6000) {
+                V[x] = nn;
+            } else if ((opcode & 0xF000) === 0x7000) {
+                V[x] = (V[x] + nn) & 0xFF;
+            } else if ((opcode & 0xF00F) === 0x8000) {
+                V[x] = V[y];
+            } else if ((opcode & 0xF00F) === 0x8001) {
+                V[x] |= V[y];   //OR
+            } else if ((opcode & 0xF00F) === 0x8002) {
+                V[x] &= V[y];   //AND
+            } else if ((opcode & 0xF00F) === 0x8003) {
+                V[x] ^= V[y];   //XOR
+            } else if ((opcode & 0xF00F) === 0x8004) {
+                const sum = V[x] + V[y];    //Carry
+                V[0xF] = sum > 0xFF ? 1 : 0;
+                V[x] = sum & 0xFF;
+            } else if ((opcode & 0xF00F) === 0x8005) {
+                V[0xF] = V[x] > V[y] ? 1 : 0;   //Borrow
+                V[x] = (V[x] - V[y]) & 0xFF;
+            } else if ((opcode & 0xF00F) === 0x8006) {
+                V[0xF] = V[x] & 0x1;
+                V[x] >>= 1;
+            } else if ((opcode & 0xF00F) === 0x8007) {
+                V[0xF] = V[y] > V[x] ? 1 : 0;
+                V[x] = (V[y] - V[x]) & 0xFF;
+            } else if ((opcode & 0xF00F) === 0x800E) {
+                V[0xF] = V[x] >> 7;
+                V[x] = (V[x] << 1) & 0xFF;
+            } else if ((opcode & 0xF00F) === 0x9000) {
+                if (V[x] !== V[y]) PC += 2;
+            } else if ((opcode & 0xF000) === 0xA000) {
+                I = nnn;
+            } else if ((opcode & 0xF000) === 0xB000) {
+                PC = nnn + V[0];
+            } else if ((opcode & 0xF000) === 0xC000) {
+                V[x] = Math.floor(Math.random() * 256) & nn;
+            } else if ((opcode & 0xF000) === 0xD000) {  //Sprite Interaction Logic
+                V[0xF] = 0;
+                for (let row = 0; row < n; row++) {
+                    const sprite = mempry[I + row];
+                    for (let col = 0; col < 8; col++) {
+                        if (sprite & (0x80 >> col)) {
+                            const x_pos = (V[x] + col) % WIDTH;
+                            const y_pos = (V[y] + row) % HEIGHT;
+                            const index = y_pos * WIDTH + x_pos;
+                            V[0xF] |= display[index];
+                            display[index] ^= 1;
+                        }
+                    }
+                }
+                displayDirty = true;
+            } else if ((opcode & 0xF0FF) === 0xE09E) {
+                if (keys[V[x]]) PC += 2;
+            } else if ((opcode & 0xF0FF) === 0xE0A1) {
+                if (!keys[V[x]]) PC += 2;
+            } else if ((opcode & 0xF0FF) === 0xF007) {
+                V[x] = delay_timer;
+            } else if ((opcode & 0xF0FF) === 0xF00A) {  //Keypress Logic
+                let pressed = false;
+                for (let i = 0; i < 16; i++) {
+                    if (keys[i]) {
+                        V[x] = i;
+                        pressed = true;
+                        break;
+                    }
+                }
+                if (!pressed) PC -= 2;
+            } else if ((opcode & 0xF0FF) === 0xF015) {
+                delay_timer = V[x];
+            } else if ((opcode & 0xF0FF) === 0xF018) {
+                sound_timer = V[x];
+            } else if ((opcode & 0xF0FF) === 0xF01E) {
+                I = (I + V[x]) & 0xFFFF;
+            } else if ((opcode & 0xF0FF) === 0xF029) {
+                I = 0x50 + (V[x] & 0xF) * 5;
+            } else if ((opcode & 0xF0FF) === 0xF033) {
+                mempry[I] = Math.floor(V[x] / 100);
+                mempry[I + 1] = Math.floor((V[x] / 10) % 10);
+                mempry[I + 2] = V[x] % 10;
+            } else if ((opcode & 0xF0FF) === 0xF055) {
+                for (let i = 0; i <= x; i++) {
+                    mempry[I + i] = V[i];   //Store
+                }
+            } else if ((opcode & 0xF0FF) === 0xF065) {
+                for (let i = 0; i <= x; i++) {
+                    V[i] = mempry[I + i];   //Load
+                }
+            }
+            updateRegistersDisplay();
+        }
+
+        // Start emulator Loop
+        function startEmulator() {
+            let lastTime = performance.now();
+            const frameTime = 1000 / FPS;
+            const cyclesPerFrameDefault = Math.floor(CYCLES_PER_SECOND / FPS);
+
+            function gameLoop(currentTime) {
+                if (isRunning) {
+                    const deltaTime = currentTime - lastTime;
+                    const cyclesToRun = Math.min(cyclesPerFrame, Math.floor((deltaTime * CYCLES_PER_SECOND) / 1000));
+
+                    for (let i = 0; i < cyclesToRun; i++) {
+                        emulateCycle(); //Run Cycle by checking opCodes for functionality
+                    }
+
+                    updateTimer();
+                    updateDisplay();
+                    OpcodeBuffer();
+                }
+
+                lastTime = currentTime;
+                requestAnimationFrame(gameLoop); //Update display with changes, Suggested imporvements over past looping
+            }
+
+            requestAnimationFrame(gameLoop);
+
+            setInterval(() => {
+                if (isRunning) updateTimer();
+            }, 1000 / 60);
+        }
+
+        // Toggle start/stop text and 'greyed-out'
+        function toggleStartStop() {
+            isRunning = !isRunning;
+            startStopBtn.textContent = isRunning ? "Stop" : "Start";
+            refreshRateInput.disabled = isRunning; //Disable when running
+        }
+
+        // Update refresh rate, only accessible when paused
+        function updateRefreshRate(value) {
+            const parsedValue = parseInt(value);
+            //Validate is in spec with this specfic chip-8 version, others support different rates
+            if (!isNaN(parsedValue) && parsedValue >= 0 && parsedValue <= 60) {
+                cyclesPerFrame = parsedValue;
+            }
+            refreshRateInput.value = cyclesPerFrame;
+        }
+
+        // Keyboard handlers
+        document.addEventListener("keydown", (event) => {
+            if (keyMap[event.key]) keys[keyMap[event.key]] = 1;
+        });
+        document.addEventListener("keyup", (event) => {
+            if (keyMap[event.key]) keys[keyMap[event.key]] = 0;
+        });
+
+        // Handle refresh rate changes
+        refreshRateInput.addEventListener("input", () => {
+            if (!isRunning) {
+                updateRefreshRate(refreshRateInput.value);
+            }
+        });
+
+        // Handle ROM file selection
+        romFileInput.addEventListener("change", () => {
+            if (romFileInput.files.length > 0) {
+                load_rom(romFileInput.files[0]);
+            } else {
+                alert("Please select correct ROM(.ch8) file first!")
+            }
+        });
+    </script>
+    <h1>This is a Heading</h1>
+    <p>This is a paragraph.</p>
+</body>
+
+</html>
