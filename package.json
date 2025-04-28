@@ -3,7 +3,7 @@
   "displayName": "Chip-8",
   "publisher": "dali300",
   "description": "Chip8 onto VsCode",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "engines": {
     "vscode": "^1.97.0"
   },
@@ -15,16 +15,25 @@
     "Programming Languages"
   ],
   "contributes": {
-    "languages": [{
-      "id": "ch8",
-      "aliases": ["chip-8", "ch8"],
-      "extensions": [".ch8"],
-      "configuration": "./language-configuration.json"
-    }],
-    "grammars": [{
-      "language": "ch8",
-      "scopeName": "source.chip8",
-      "path": "./syntaxes/ch8.tmLanguage.json"
-    }]
+    "languages": [
+      {
+        "id": "ch8",
+        "aliases": [
+          "chip-8",
+          "ch8"
+        ],
+        "extensions": [
+          ".ch8"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ch8",
+        "scopeName": "source.chip8",
+        "path": "./syntaxes/ch8.tmLanguage.json"
+      }
+    ]
   }
 }
